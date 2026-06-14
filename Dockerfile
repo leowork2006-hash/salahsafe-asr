@@ -11,6 +11,6 @@ RUN pip install --no-cache-dir \
 COPY handler.py .
 
 # Bake the Tarteel model into the image so cold starts don't download it.
-RUN python -c "from transformers import pipeline; pipeline('automatic-speech-recognition', model='tarteel-ai/whisper-base-ar-quran')"
+RUN python -c "from transformers import pipeline; pipeline('automatic-speech-recognition', model='dmoayad/whisper-medium-tarteel-quraan')"
 
 CMD ["python", "-u", "handler.py"]

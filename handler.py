@@ -22,7 +22,7 @@ import runpod
 import torch
 from transformers import pipeline
 
-MODEL_ID = "tarteel-ai/whisper-base-ar-quran"
+MODEL_ID = "dmoayad/whisper-medium-tarteel-quraan"
 
 _use_cuda = torch.cuda.is_available()
 _device = 0 if _use_cuda else -1
