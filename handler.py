@@ -54,10 +54,9 @@ def handler(event):
     if audio.size == 0:
         return {"text": ""}
 
-    out = asr(
-        {"raw": audio, "sampling_rate": sample_rate},
-        generate_kwargs={"language": "ar", "task": "transcribe"},
-    )
+    # The Tarteel fine-tune is Arabic-only, so we DON'T pass language/task
+    # (its generation_config rejects them). It transcribes Quranic Arabic by default.
+    out = asr({"raw": audio, "sampling_rate": sample_rate})
     return {"text": (out.get("text") or "").strip()}
 
 
