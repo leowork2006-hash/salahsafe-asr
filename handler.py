@@ -7,8 +7,13 @@ public Quran fine-tune. The app then aligns the text against the KNOWN ayah to
 light words green/red (mistake / makharij). We never send back "scripture" —
 only what was heard, for matching.
 
-Input  : { "input": { "audio_b64": <base64 PCM16 mono>, "sample_rate": 16000 } }
+Input  : { "input": { "audio_b64": <base64 PCM16 mono>, "sample_rate": 16000,
+                        "prompt": "<expected ayah words to bias the model>" } }
 Output : { "text": "<transcribed arabic>" }
+
+`prompt` is optional but strongly recommended: because the app knows which ayah
+the user is reciting, we feed those words as a Whisper prompt so the model locks
+onto the correct Quranic wording instead of guessing (big accuracy win).
 """
 import base64
 
@@ -54,10 +59,30 @@ def handler(event):
     if audio.size == 0:
         return {"text": ""}
 
-    # The Tarteel fine-tune is Arabic-only, so we DON'T pass language/task
-    # (its generation_config rejects them). It transcribes Quranic Arabic by default.
-    out = asr({"raw": audio, "sampling_rate": sample_rate})
-    return {"text": (out.get("text") or "").strip()}
+    # Bias the model toward the expected ayah (we know what should be recited).
+    # Whisper only uses the last ~224 prompt tokens, so a compact prompt is fine.
+    prompt = (inp.get("prompt") or "").strip()
+    gen_kwargs = {}
+    if prompt:
+        try:
+            pid = asr.tokenizer.get_prompt_ids(prompt[:300], return_tensors="pt")
+            gen_kwargs = {"prompt_ids": pid.to(asr.model.device)}
+        except Exception:  # noqa: BLE001
+            gen_kwargs = {}
+
+    sample = {"raw": audio, "sampling_rate": sample_rate}
+    # The Tarteel fine-tune is Arabic-only, so we DON'T pass language/task.
+    # If prompt conditioning errors for any reason, fall back to plain decode.
+    try:
+        out = asr(sample, generate_kwargs=gen_kwargs) if gen_kwargs else asr(sample)
+    except Exception:  # noqa: BLE001
+        out = asr(sample)
+
+    text = (out.get("text") or "").strip()
+    # Whisper can echo the prompt back at the start — strip it if so.
+    if prompt and text.startswith(prompt[:300]):
+        text = text[len(prompt[:300]):].strip()
+    return {"text": text}
 
 
 runpod.serverless.start({"handler": handler})
