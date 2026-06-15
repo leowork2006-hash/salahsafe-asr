@@ -5,7 +5,7 @@ WORKDIR /app
 RUN pip install --no-cache-dir \
     runpod==1.7.7 \
     "faster-whisper==1.0.3" \
-    "transformers==4.44.2"
+    "transformers==4.49.0"
 
 # Convert the Quran-tuned Whisper to CTranslate2 INT8 — ~4x faster inference
 # (the accessible equivalent of Tarteel's TensorRT optimization).
