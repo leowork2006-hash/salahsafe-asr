@@ -1,87 +1,62 @@
 """
-SalahSafe Tilāwah — RunPod serverless ASR worker.
+SalahSafe Tilāwah — RunPod serverless ASR worker (faster-whisper / CTranslate2).
 
-Realtime, Tarteel-style: the phone streams SHORT rolling windows (~the last
-2–3 s of audio) and this worker transcribes just that window with Tarteel's
-public Quran fine-tune. The app then aligns the text against the KNOWN ayah to
-light words green/red (mistake / makharij). We never send back "scripture" —
-only what was heard, for matching.
+Tarteel's real architecture, scaled to budget:
+  • Quran-tuned Whisper (whisper-small-quran) converted to CTranslate2 INT8 → ~4x
+    faster inference (the accessible version of their TensorRT).
+  • Built-in Silero VAD (vad_filter) → skips silence, like Tarteel's VAD stage.
+  • initial_prompt = the expected ayah → biases decoding to the right words.
+  • beam_size=1 → lowest latency.
 
-Input  : { "input": { "audio_b64": <base64 PCM16 mono>, "sample_rate": 16000,
-                        "prompt": "<expected ayah words to bias the model>" } }
+The app aligns the returned text against the KNOWN mushaf — we never render the
+model output as scripture.
+
+Input  : { "input": { "audio_b64": <base64 PCM16 mono 16k>, "sample_rate": 16000,
+                       "prompt": "<expected ayah words>" } }
 Output : { "text": "<transcribed arabic>" }
-
-`prompt` is optional but strongly recommended: because the app knows which ayah
-the user is reciting, we feed those words as a Whisper prompt so the model locks
-onto the correct Quranic wording instead of guessing (big accuracy win).
 """
 import base64
 
 import numpy as np
 import runpod
-import torch
-from transformers import pipeline
+from faster_whisper import WhisperModel
 
-MODEL_ID = "dmoayad/whisper-medium-tarteel-quraan"
-
-_use_cuda = torch.cuda.is_available()
-_device = 0 if _use_cuda else -1
-_dtype = torch.float16 if _use_cuda else torch.float32
-
-# Loaded once per worker, then reused for every request (warm = instant).
-asr = pipeline(
-    "automatic-speech-recognition",
-    model=MODEL_ID,
-    device=_device,
-    torch_dtype=_dtype,
-    chunk_length_s=30,
-)
+# int8_float16 on GPU = fast + tiny VRAM (~0.5 GB for small).
+model = WhisperModel("/app/model_ct2", device="cuda", compute_type="int8_float16")
 
 
 def _decode_pcm16(audio_b64: str) -> np.ndarray:
     raw = base64.b64decode(audio_b64)
-    # int16 little-endian mono -> float32 in [-1, 1]
     return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
 
 def handler(event):
     inp = (event or {}).get("input") or {}
     audio_b64 = inp.get("audio_b64")
-    sample_rate = int(inp.get("sample_rate", 16000))
     if not audio_b64:
         return {"error": "missing audio_b64"}
+    prompt = (inp.get("prompt") or "").strip() or None
 
     try:
         audio = _decode_pcm16(audio_b64)
     except Exception as exc:  # noqa: BLE001
         return {"error": f"bad audio: {exc}"}
-
     if audio.size == 0:
         return {"text": ""}
 
-    # Bias the model toward the expected ayah (we know what should be recited).
-    # Whisper only uses the last ~224 prompt tokens, so a compact prompt is fine.
-    prompt = (inp.get("prompt") or "").strip()
-    gen_kwargs = {}
-    if prompt:
-        try:
-            pid = asr.tokenizer.get_prompt_ids(prompt[:300], return_tensors="pt")
-            gen_kwargs = {"prompt_ids": pid.to(asr.model.device)}
-        except Exception:  # noqa: BLE001
-            gen_kwargs = {}
-
-    sample = {"raw": audio, "sampling_rate": sample_rate}
-    # The Tarteel fine-tune is Arabic-only, so we DON'T pass language/task.
-    # If prompt conditioning errors for any reason, fall back to plain decode.
     try:
-        out = asr(sample, generate_kwargs=gen_kwargs) if gen_kwargs else asr(sample)
-    except Exception:  # noqa: BLE001
-        out = asr(sample)
+        segments, _info = model.transcribe(
+            audio,
+            language="ar",
+            initial_prompt=prompt,
+            beam_size=1,
+            vad_filter=True,
+            condition_on_previous_text=False,
+        )
+        text = " ".join(s.text for s in segments).strip()
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"transcribe failed: {exc}"}
 
-    text = (out.get("text") or "").strip()
-    # Whisper can echo the prompt back at the start — strip it if so.
-    if prompt and text.startswith(prompt[:300]):
-        text = text[len(prompt[:300]):].strip()
     return {"text": text}
 
 
