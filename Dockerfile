@@ -6,7 +6,13 @@ RUN pip install --no-cache-dir \
     runpod==1.7.7 \
     "ctranslate2==4.4.0" \
     "faster-whisper==1.0.3" \
-    "transformers==4.44.2"
+    "transformers==4.44.2" \
+    "nvidia-cublas-cu12" \
+    "nvidia-cudnn-cu12==9.1.0.70"
+
+# ctranslate2 must find cuDNN/cuBLAS at runtime or it crawls on CPU (~40s/clip).
+# Put the pip-installed NVIDIA libs on the loader path.
+ENV LD_LIBRARY_PATH=/opt/conda/lib/python3.11/site-packages/nvidia/cudnn/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cublas/lib:${LD_LIBRARY_PATH}
 
 # Convert the Quran-tuned Whisper to CTranslate2 INT8 — ~4x faster inference
 # (the accessible equivalent of Tarteel's TensorRT optimization).
