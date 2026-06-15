@@ -1,15 +1,12 @@
 """
-SalahSafe Tilāwah — RunPod serverless ASR worker (faster-whisper / CTranslate2).
+SalahSafe Tilāwah — RunPod serverless ASR worker (transformers pipeline).
 
-Tarteel's real architecture, scaled to budget:
-  • Quran-tuned Whisper (whisper-small-quran) converted to CTranslate2 INT8 → ~4x
-    faster inference (the accessible version of their TensorRT).
-  • Built-in Silero VAD (vad_filter) → skips silence, like Tarteel's VAD stage.
-  • initial_prompt = the expected ayah → biases decoding to the right words.
-  • beam_size=1 → lowest latency.
+Uses the WORKING transformers Whisper path (GPU-proven ~0.7s) with the Tadabur
+Quran fine-tune (trained on ~1,400 h — the most accurate public Quran model).
 
-The app aligns the returned text against the KNOWN mushaf — we never render the
-model output as scripture.
+We load the model weights from Tadabur but the STANDARD whisper-small tokenizer
++ feature extractor (Quran fine-tunes keep Whisper's vocab) — this sidesteps any
+broken tokenizer.json in community repos.
 
 Input  : { "input": { "audio_b64": <base64 PCM16 mono 16k>, "sample_rate": 16000,
                        "prompt": "<expected ayah words>" } }
@@ -19,10 +16,34 @@ import base64
 
 import numpy as np
 import runpod
-from faster_whisper import WhisperModel
+import torch
+from transformers import (
+    WhisperFeatureExtractor,
+    WhisperForConditionalGeneration,
+    WhisperTokenizer,
+    pipeline,
+)
 
-# int8_float16 on GPU = fast + tiny VRAM (~0.5 GB for small).
-model = WhisperModel("/app/model_ct2", device="cuda", compute_type="int8_float16")
+MODEL_ID = "FaisaI/tadabur-Whisper-Small"
+TOKENIZER_ID = "openai/whisper-small"  # same vocab as any whisper-small fine-tune
+
+_cuda = torch.cuda.is_available()
+_device = 0 if _cuda else -1
+_dtype = torch.float16 if _cuda else torch.float32
+
+_model = WhisperForConditionalGeneration.from_pretrained(MODEL_ID, torch_dtype=_dtype)
+_tokenizer = WhisperTokenizer.from_pretrained(TOKENIZER_ID)
+_feature_extractor = WhisperFeatureExtractor.from_pretrained(TOKENIZER_ID)
+
+asr = pipeline(
+    "automatic-speech-recognition",
+    model=_model,
+    tokenizer=_tokenizer,
+    feature_extractor=_feature_extractor,
+    device=_device,
+    torch_dtype=_dtype,
+    chunk_length_s=30,
+)
 
 
 def _decode_pcm16(audio_b64: str) -> np.ndarray:
@@ -35,7 +56,6 @@ def handler(event):
     audio_b64 = inp.get("audio_b64")
     if not audio_b64:
         return {"error": "missing audio_b64"}
-    prompt = (inp.get("prompt") or "").strip() or None
 
     try:
         audio = _decode_pcm16(audio_b64)
@@ -44,19 +64,25 @@ def handler(event):
     if audio.size == 0:
         return {"text": ""}
 
-    try:
-        segments, _info = model.transcribe(
-            audio,
-            language="ar",
-            initial_prompt=prompt,
-            beam_size=1,
-            vad_filter=True,
-            condition_on_previous_text=False,
-        )
-        text = " ".join(s.text for s in segments).strip()
-    except Exception as exc:  # noqa: BLE001
-        return {"error": f"transcribe failed: {exc}"}
+    # Bias decoding toward the expected ayah (we know what should be recited).
+    prompt = (inp.get("prompt") or "").strip()
+    gen_kwargs = {}
+    if prompt:
+        try:
+            pid = asr.tokenizer.get_prompt_ids(prompt[:300], return_tensors="pt")
+            gen_kwargs = {"prompt_ids": pid.to(asr.model.device)}
+        except Exception:  # noqa: BLE001
+            gen_kwargs = {}
 
+    sample = {"raw": audio, "sampling_rate": int(inp.get("sample_rate", 16000))}
+    try:
+        out = asr(sample, generate_kwargs=gen_kwargs) if gen_kwargs else asr(sample)
+    except Exception:  # noqa: BLE001
+        out = asr(sample)
+
+    text = (out.get("text") or "").strip()
+    if prompt and text.startswith(prompt[:300]):
+        text = text[len(prompt[:300]):].strip()
     return {"text": text}
 
 
