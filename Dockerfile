@@ -1,19 +1,23 @@
-FROM pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime
+# SalahSafe Tilāwah — CTC (wav2vec2) ASR worker.
+# cuDNN 9 in the system path so torch uses the GPU properly.
+FROM nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
 
+ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /app
 
-RUN pip install --no-cache-dir \
-    runpod==1.7.7 \
-    "transformers==4.44.2" \
-    accelerate==0.34.2
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends python3 python3-pip && \
+    rm -rf /var/lib/apt/lists/*
 
-# Bake the Tadabur Quran model + standard whisper-small tokenizer into the image
-# so cold starts don't download them.
-RUN python -c "from transformers import WhisperForConditionalGeneration, WhisperTokenizer, WhisperFeatureExtractor; \
-    WhisperForConditionalGeneration.from_pretrained('FaisaI/tadabur-Whisper-Small'); \
-    WhisperTokenizer.from_pretrained('openai/whisper-small'); \
-    WhisperFeatureExtractor.from_pretrained('openai/whisper-small')"
+# torch (CUDA 12.1 wheels work on the 12.3 runtime) + transformers + runpod
+RUN pip3 install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu121
+RUN pip3 install --no-cache-dir runpod==1.7.7 "transformers==4.44.2"
+
+# Bake the Quran-tuned wav2vec2-CTC model so cold starts don't download it.
+RUN python3 -c "from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor; \
+    Wav2Vec2Processor.from_pretrained('rabah2026/wav2vec2-large-xlsr-53-arabic-quran-v_final'); \
+    Wav2Vec2ForCTC.from_pretrained('rabah2026/wav2vec2-large-xlsr-53-arabic-quran-v_final')"
 
 COPY handler.py .
 
-CMD ["python", "-u", "handler.py"]
+CMD ["python3", "-u", "handler.py"]

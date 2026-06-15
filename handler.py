@@ -1,15 +1,15 @@
 """
-SalahSafe Tilāwah — RunPod serverless ASR worker (transformers pipeline).
+SalahSafe Tilāwah — RunPod ASR worker, CTC edition (wav2vec2).
 
-Uses the WORKING transformers Whisper path (GPU-proven ~0.7s) with the Tadabur
-Quran fine-tune (trained on ~1,400 h — the most accurate public Quran model).
+Architecturally correct path (fact-checked): a CTC model outputs frame-level
+character probabilities in a SINGLE forward pass — far faster than Whisper's
+autoregressive decoding, and the Quran fine-tune keeps it constrained to
+classical Arabic. Drop-in: same input/output as before (audio_b64 → text), so
+the app needs no change.
 
-We load the model weights from Tadabur but the STANDARD whisper-small tokenizer
-+ feature extractor (Quran fine-tunes keep Whisper's vocab) — this sidesteps any
-broken tokenizer.json in community repos.
+Model: rabah2026/wav2vec2-large-xlsr-53-arabic-quran (wav2vec2-CTC, Quran-tuned).
 
-Input  : { "input": { "audio_b64": <base64 PCM16 mono 16k>, "sample_rate": 16000,
-                       "prompt": "<expected ayah words>" } }
+Input  : { "input": { "audio_b64": <base64 PCM16 mono 16k>, "sample_rate": 16000 } }
 Output : { "text": "<transcribed arabic>" }
 """
 import base64
@@ -17,33 +17,13 @@ import base64
 import numpy as np
 import runpod
 import torch
-from transformers import (
-    WhisperFeatureExtractor,
-    WhisperForConditionalGeneration,
-    WhisperTokenizer,
-    pipeline,
-)
+from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 
-MODEL_ID = "FaisaI/tadabur-Whisper-Small"
-TOKENIZER_ID = "openai/whisper-small"  # same vocab as any whisper-small fine-tune
+MODEL_ID = "rabah2026/wav2vec2-large-xlsr-53-arabic-quran-v_final"
 
-_cuda = torch.cuda.is_available()
-_device = 0 if _cuda else -1
-_dtype = torch.float16 if _cuda else torch.float32
-
-_model = WhisperForConditionalGeneration.from_pretrained(MODEL_ID, torch_dtype=_dtype)
-_tokenizer = WhisperTokenizer.from_pretrained(TOKENIZER_ID)
-_feature_extractor = WhisperFeatureExtractor.from_pretrained(TOKENIZER_ID)
-
-asr = pipeline(
-    "automatic-speech-recognition",
-    model=_model,
-    tokenizer=_tokenizer,
-    feature_extractor=_feature_extractor,
-    device=_device,
-    torch_dtype=_dtype,
-    chunk_length_s=30,
-)
+_device = "cuda" if torch.cuda.is_available() else "cpu"
+processor = Wav2Vec2Processor.from_pretrained(MODEL_ID)
+model = Wav2Vec2ForCTC.from_pretrained(MODEL_ID).to(_device).eval()
 
 
 def _decode_pcm16(audio_b64: str) -> np.ndarray:
@@ -61,28 +41,18 @@ def handler(event):
         audio = _decode_pcm16(audio_b64)
     except Exception as exc:  # noqa: BLE001
         return {"error": f"bad audio: {exc}"}
-    if audio.size == 0:
+    if audio.size < 800:  # <0.05 s
         return {"text": ""}
 
-    # Bias decoding toward the expected ayah (we know what should be recited).
-    prompt = (inp.get("prompt") or "").strip()
-    gen_kwargs = {}
-    if prompt:
-        try:
-            pid = asr.tokenizer.get_prompt_ids(prompt[:300], return_tensors="pt")
-            gen_kwargs = {"prompt_ids": pid.to(asr.model.device)}
-        except Exception:  # noqa: BLE001
-            gen_kwargs = {}
-
-    sample = {"raw": audio, "sampling_rate": int(inp.get("sample_rate", 16000))}
     try:
-        out = asr(sample, generate_kwargs=gen_kwargs) if gen_kwargs else asr(sample)
-    except Exception:  # noqa: BLE001
-        out = asr(sample)
+        iv = processor(audio, sampling_rate=16000, return_tensors="pt", padding=True).input_values.to(_device)
+        with torch.no_grad():
+            logits = model(iv).logits
+        ids = torch.argmax(logits, dim=-1)
+        text = processor.batch_decode(ids)[0].strip()
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"ctc failed: {exc}"}
 
-    text = (out.get("text") or "").strip()
-    if prompt and text.startswith(prompt[:300]):
-        text = text[len(prompt[:300]):].strip()
     return {"text": text}
 
 
