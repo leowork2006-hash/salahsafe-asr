@@ -10,7 +10,7 @@ RUN apt-get update -y && \
     rm -rf /var/lib/apt/lists/*
 
 # torch (CUDA 12.1 wheels work on the 12.3 runtime) + transformers + runpod
-RUN pip3 install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu121
+RUN pip3 install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cu121
 RUN pip3 install --no-cache-dir runpod==1.7.7 "transformers==4.44.2"
 
 # Bake the Quran-tuned wav2vec2-CTC model so cold starts don't download it.
